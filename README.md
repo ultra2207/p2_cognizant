@@ -20,7 +20,11 @@ The code generates:
 - Start inventory: 5,000 per SKU per DC.
 
 ## Setup
-Run uv venv, and then run uv sync --upgrade to install dependencies.
+Run the following 2 commands using uv pachage manager to setup the program.
+```bash
+uv venv
+uv sync --upgrade
+```
 
 ## Usage
 Run the planner with default embedded demand:
