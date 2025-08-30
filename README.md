@@ -19,6 +19,9 @@ The code generates:
 - Fair-share allocation used when supply < demand.
 - Start inventory: 5,000 per SKU per DC.
 
+## Setup
+Run uv venv, and then run uv sync --upgrade to install dependencies.
+
 ## Usage
 Run the planner with default embedded demand:
 
