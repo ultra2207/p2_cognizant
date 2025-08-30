@@ -1,0 +1,9 @@
+[project]
+name = "cola-planner"
+version = "0.1.0"
+dependencies = [
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "streamlit",
+]

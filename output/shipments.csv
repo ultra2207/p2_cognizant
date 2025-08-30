@@ -1,0 +1,17 @@
+Week,SKU,DC,Qty,Trucks
+1,Regular,North,30000,3
+1,Regular,South,30000,3
+1,Diet,North,20000,2
+1,Diet,South,20000,2
+2,Regular,North,40000,4
+2,Regular,South,30000,3
+2,Diet,North,30000,3
+2,Diet,South,20000,2
+3,Regular,North,40000,4
+3,Regular,South,40000,4
+3,Diet,North,30000,3
+3,Diet,South,30000,3
+4,Regular,North,50000,5
+4,Regular,South,40000,4
+4,Diet,North,40000,4
+4,Diet,South,30000,3
