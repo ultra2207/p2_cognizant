@@ -25,7 +25,7 @@ Run the following 2 commands using uv pachage manager to setup the program.
 git clone https://github.com/ultra2207/p2_cognizant.git
 cd p2_cognizant
 uv venv
-activate
+.venv\Scripts\activate
 uv sync --upgrade
 streamlit run app.py
 ```
