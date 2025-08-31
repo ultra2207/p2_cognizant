@@ -49,10 +49,74 @@ def allocate_fair_share(demand_df, prod_df):
             shipments.append([week, sku, "South", s_share])
     return pd.DataFrame(shipments, columns=["Week", "SKU", "DC", "Qty"])
 
-def apply_truck_rounding(ship_df, truck_size):
-    ship_df["Trucks"] = np.ceil(ship_df["Qty"] / truck_size).astype(int)
-    ship_df["Qty"] = ship_df["Trucks"] * truck_size
+def apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety, initial_inventory=None):
+    """Enhanced truck rounding that considers inventory levels and actual needs"""
+    ship_df = ship_df.copy()
+    
+    # Initialize inventory if not provided
+    if initial_inventory is None:
+        inv = {("North","Regular"):safety, ("North","Diet"):safety,
+               ("South","Regular"):safety, ("South","Diet"):safety}
+    else:
+        inv = initial_inventory.copy()
+    
+    # Process week by week to make informed decisions
+    for week in sorted(ship_df["Week"].unique()):
+        week_shipments = ship_df[ship_df["Week"] == week].copy()
+        week_demand = demand_df[demand_df["Week"] == week].iloc[0]
+        
+        for idx, row in week_shipments.iterrows():
+            dc = row["DC"]
+            sku = row["SKU"]
+            proposed_qty = row["Qty"]
+            
+            # Calculate actual need
+            current_inv = inv[(dc, sku)]
+            demand = week_demand[f"{dc}_{sku}"]
+            needed = max(0, demand + safety - current_inv)
+            
+            # Calculate truck options
+            trucks_down = int(needed // truck_size)
+            trucks_up = trucks_down + 1
+            
+            qty_down = trucks_down * truck_size
+            qty_up = trucks_up * truck_size
+            
+            # Evaluate outcomes
+            ending_inv_down = current_inv + qty_down - demand
+            ending_inv_up = current_inv + qty_up - demand
+            
+            # Decision logic
+            if qty_down == 0 and needed > 0:
+                # Must send at least one truck
+                chosen_qty = qty_up
+                chosen_trucks = trucks_up
+            elif ending_inv_down >= safety:
+                # Rounding down meets safety stock - prefer this to avoid waste
+                chosen_qty = qty_down
+                chosen_trucks = trucks_down
+            elif (qty_up - needed) > (truck_size * 0.6):
+                # Rounding up creates too much waste (>60% of truck capacity)
+                # Accept going slightly below safety stock
+                chosen_qty = qty_down
+                chosen_trucks = trucks_down
+            else:
+                # Round up to maintain safety stock
+                chosen_qty = qty_up
+                chosen_trucks = trucks_up
+            
+            # Update the dataframe
+            ship_df.at[idx, "Trucks"] = chosen_trucks
+            ship_df.at[idx, "Qty"] = chosen_qty
+            
+            # Update inventory for next iteration
+            inv[(dc, sku)] = max(0, current_inv + chosen_qty - demand)
+    
     return ship_df
+
+def apply_truck_rounding(ship_df, truck_size):
+    """Simple truck rounding - kept for backward compatibility"""
+    return apply_smart_truck_rounding(ship_df, demand_df, truck_size, 5000)
 
 def simulate_inventory(ship_df, demand_df, safety):
     records = []
@@ -66,9 +130,13 @@ def simulate_inventory(ship_df, demand_df, safety):
                 demand = row[f"{dc}_{sku}"]
                 start = inv[(dc,sku)]
                 end = start + arrivals - demand
-                if end < safety: end = safety
-                records.append([week, dc, sku, start, arrivals, demand, end])
-                inv[(dc,sku)] = end
+                
+                # Don't artificially bump inventory to safety stock
+                # Let it go below and track the shortfall
+                actual_end = max(0, end)  # Can't go negative
+                
+                records.append([week, dc, sku, start, arrivals, demand, actual_end])
+                inv[(dc,sku)] = actual_end
     return pd.DataFrame(records, columns=["Week","DC","SKU","Start","Arrivals","Demand","End"])
 
 def fulfillment_summary(demand_df):
@@ -133,7 +201,7 @@ def run_planner(capacity, truck_size, safety, demand_df=None):
         demand_df = pd.DataFrame(demand_data)
     prod_df = plan_production(demand_df, capacity)
     ship_df = allocate_fair_share(demand_df, prod_df)
-    ship_df = apply_truck_rounding(ship_df, truck_size)
+    ship_df = apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety)
     inv_df = simulate_inventory(ship_df, demand_df, safety)
     ful_df = fulfillment_summary(demand_df)
 
@@ -180,7 +248,7 @@ if __name__ == "__main__":
 
     prod_df = plan_production(demand_df, args.capacity)
     ship_df = allocate_fair_share(demand_df, prod_df)
-    ship_df = apply_truck_rounding(ship_df, args.truck)
+    ship_df = apply_smart_truck_rounding(ship_df, demand_df, args.truck, args.safety)
     inv_df = simulate_inventory(ship_df, demand_df, args.safety)
     ful_df = fulfillment_summary(demand_df)
 
