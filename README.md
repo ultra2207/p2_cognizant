@@ -19,6 +19,17 @@ The code generates:
 - Fair-share allocation used when supply < demand.
 - Start inventory: 5,000 per SKU per DC.
 
+## Setup
+Run the following 2 commands using uv pachage manager to setup the program.
+```bash
+git clone https://github.com/ultra2207/p2_cognizant.git
+cd p2_cognizant
+uv venv
+.venv\Scripts\activate
+uv sync --upgrade
+streamlit run app.py
+```
+
 ## Usage
 Run the planner with default embedded demand:
 
