@@ -111,7 +111,7 @@ if st.session_state.planning_results is not None:
         with st.expander("Generated Demand", expanded=True):
             st.dataframe(demand_df, width='stretch')
             
-        with st.expander("Production Plan", expanded=True):
+        with st.expander("Production based on MOQ", expanded=True):
             st.dataframe(prod_df, width='stretch')
         
         with st.expander("Shipments", expanded=False):
