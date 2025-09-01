@@ -33,7 +33,7 @@ with st.sidebar:
     st.header("Data Input")
     demand_file = st.file_uploader("Demand CSV (optional)", type="csv", help="Upload custom demand data. Ignored if 'Generate Random Demand' is checked.")
 
-if st.button("Run Planning", type="primary", use_container_width=True):
+if st.button("Run Planning", type="primary", width='stretch'):
     with st.spinner("Generating production plan..."):
         if use_random:
             demand_df = generate_random_demand(num_weeks=num_weeks, variance=variance, seed=seed)
@@ -109,51 +109,51 @@ if st.session_state.planning_results is not None:
 
     with tab1:
         with st.expander("Generated Demand", expanded=True):
-            st.dataframe(demand_df, use_container_width=True)
+            st.dataframe(demand_df, width='stretch')
             
         with st.expander("Production Plan", expanded=True):
-            st.dataframe(prod_df, use_container_width=True)
+            st.dataframe(prod_df, width='stretch')
         
         with st.expander("Shipments", expanded=False):
-            st.dataframe(ship_df, use_container_width=True)
+            st.dataframe(ship_df, width='stretch')
         
         with st.expander("Inventory by DC", expanded=False):
-            st.dataframe(inv_df, use_container_width=True)
+            st.dataframe(inv_df, width='stretch')
         
         with st.expander("Fulfillment Summary", expanded=False):
-            st.dataframe(ful_df, use_container_width=True)
+            st.dataframe(ful_df, width='stretch')
 
     with tab2:
         st.subheader("Demand vs Fulfilled")
         col1, col2 = st.columns(2)
         with col1:
             if len(fig_paths) > 0 and os.path.exists(fig_paths[0]):
-                st.image(fig_paths[0], caption="Regular SKU", use_container_width=True)
+                st.image(fig_paths[0], caption="Regular SKU", width='stretch')
         with col2:
             if len(fig_paths) > 1 and os.path.exists(fig_paths[1]):
-                st.image(fig_paths[1], caption="Diet SKU", use_container_width=True)
+                st.image(fig_paths[1], caption="Diet SKU", width='stretch')
 
         # Put Shipments and Inventory side by side
         col3, col4 = st.columns(2)
         with col3:
             st.subheader("Shipments by Lane")
             if len(fig_paths) > 2 and os.path.exists(fig_paths[2]):
-                st.image(fig_paths[2], use_container_width=True)
+                st.image(fig_paths[2], width='stretch')
         
         with col4:
             st.subheader("Ending Inventory vs Safety Stock")
             if len(fig_paths) > 3 and os.path.exists(fig_paths[3]):
-                st.image(fig_paths[3], use_container_width=True)
+                st.image(fig_paths[3], width='stretch')
 
     with tab3:
         st.subheader("Reserve System Activity")
         
         if not reserve_df.empty:
-            st.dataframe(reserve_df, use_container_width=True)
+            st.dataframe(reserve_df, width='stretch')
             
             # Show reserve chart
             if len(fig_paths) > 4 and os.path.exists(fig_paths[4]):
-                st.image(fig_paths[4], caption="Reserve System Status", use_container_width=True)
+                st.image(fig_paths[4], caption="Reserve System Status", width='stretch')
         else:
             st.info("No reserve system activity recorded - demand was fully met by production capacity.")
 
@@ -180,7 +180,7 @@ if st.session_state.planning_results is not None:
                             data=f,
                             file_name=file,
                             mime="text/csv",
-                            use_container_width=True,
+                            width='stretch',
                             key=f"download_{file}"  # Unique key to prevent conflicts
                         )
 
