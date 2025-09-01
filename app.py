@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from planner import run_planner, default_demand_df
+from planner import run_planner, default_demand_df, generate_random_demand
 import os
 
 st.set_page_config(page_title="Cola Company Planner", layout="wide")
@@ -16,19 +16,33 @@ with st.sidebar:
     capacity = st.number_input("Weekly Plant Capacity", value=150000, min_value=0, help="Total bottles the plant can produce per week")
     truck = st.number_input("Truck Size (bottles)", value=10000, min_value=0, help="Number of bottles per truck shipment")
     safety = st.number_input("Safety Stock / DC / SKU", value=5000, min_value=0, help="Minimum inventory to maintain at each DC per SKU")
+    container = st.number_input("Customer Container Size", value=750, min_value=0, help="Customer orders must be in multiples of this size")
+
+    st.header("Demand Generation")
+    use_random = st.checkbox("Generate Random Demand", value=True, help="Generate random demand data instead of using uploaded file")
+    
+    if use_random:
+        seed = st.number_input("Random Seed", value=42, min_value=0, help="Seed for reproducible random generation")
+        num_weeks = st.number_input("Number of Weeks", value=4, min_value=1, max_value=52)
+        variance = st.slider("Demand Variance", 0.0, 0.5, 0.2, help="Percentage variance in demand (±20% = 0.2)")
+    else:
+        seed = None
+        num_weeks = 4
+        variance = 0.2
 
     st.header("Data Input")
-    demand_file = st.file_uploader("Demand CSV (optional)", type="csv", help="Upload custom demand data. If not provided, uses default data.")
-    # init_file = st.file_uploader("Initial Inventory CSV (optional)", type="csv")
+    demand_file = st.file_uploader("Demand CSV (optional)", type="csv", help="Upload custom demand data. Ignored if 'Generate Random Demand' is checked.")
 
 if st.button("Run Planning", type="primary", use_container_width=True):
     with st.spinner("Generating production plan..."):
-        if demand_file is not None:
+        if use_random:
+            demand_df = generate_random_demand(num_weeks=num_weeks, variance=variance, seed=seed)
+        elif demand_file is not None:
             demand_df = pd.read_csv(demand_file)
         else:
             demand_df = default_demand_df()
 
-        prod_df, ship_df, inv_df, ful_df, fig_paths = run_planner(capacity, truck, safety, demand_df)
+        prod_df, ship_df, inv_df, ful_df, reserve_df, fig_paths = run_planner(capacity, truck, safety, demand_df, container)
         
         # Store results in session state
         st.session_state.planning_results = {
@@ -36,10 +50,13 @@ if st.button("Run Planning", type="primary", use_container_width=True):
             'ship_df': ship_df, 
             'inv_df': inv_df,
             'ful_df': ful_df,
+            'reserve_df': reserve_df,
             'fig_paths': fig_paths,
             'capacity': capacity,
             'truck': truck,
-            'safety': safety
+            'safety': safety,
+            'container': container,
+            'demand_df': demand_df
         }
 
     st.success("Plan generated successfully!")
@@ -51,26 +68,49 @@ if st.session_state.planning_results is not None:
     ship_df = results['ship_df']
     inv_df = results['inv_df']
     ful_df = results['ful_df']
+    reserve_df = results['reserve_df']
     fig_paths = results['fig_paths']
+    demand_df = results['demand_df']
     
-    # Display key metrics
+    # Display key metrics including reserve status
     total_weekly_capacity = results['capacity'] * prod_df.shape[0]
     total_produced = prod_df['Regular'].sum() + prod_df['Diet'].sum()
     utilization = total_produced / total_weekly_capacity * 100
     total_shipped = ship_df['Qty'].sum()
     avg_fulfillment = (ful_df['Fulfilled'].sum() / ful_df['Demand'].sum()) * 100 if ful_df['Demand'].sum() > 0 else 0
+    
+    # Calculate reserve usage
+    from planner import current_reserve, RESERVE_CAPACITY
+    reserve_used = RESERVE_CAPACITY - current_reserve
+    reserve_utilization = (reserve_used / RESERVE_CAPACITY) * 100
 
     st.markdown("### Key Performance Indicators")
-    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.metric("Capacity Utilization", f"{utilization:.1f}%", delta=f"of {results['capacity']:,}/week")
     kpi2.metric("Total Shipped", f"{total_shipped:,}", delta=f"over {prod_df.shape[0]} weeks")
     kpi3.metric("Avg. Fulfillment Rate", f"{avg_fulfillment:.1f}%")
+    kpi4.metric("Reserve Status", f"{current_reserve:,}/{RESERVE_CAPACITY:,}", 
+                delta=f"{reserve_utilization:.1f}% used" if reserve_used > 0 else "Unused")
+
+    # Show reserve transactions summary
+    if not reserve_df.empty:
+        total_used = reserve_df[reserve_df['Action'] == 'Use']['Amount'].sum()
+        total_refilled = reserve_df[reserve_df['Action'] == 'Refill']['Amount'].sum()
+        
+        st.markdown("### Reserve System Summary")
+        res1, res2, res3 = st.columns(3)
+        res1.metric("Total Used", f"{total_used:,}")
+        res2.metric("Total Refilled", f"{total_refilled:,}")
+        res3.metric("Net Change", f"{total_refilled - total_used:,}")
 
     st.divider()
 
-    tab1, tab2, tab3 = st.tabs(["Data Tables", "Visualizations", "Downloads"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Data Tables", "Visualizations", "Reserve System", "Downloads"])
 
     with tab1:
+        with st.expander("Generated Demand", expanded=True):
+            st.dataframe(demand_df, use_container_width=True)
+            
         with st.expander("Production Plan", expanded=True):
             st.dataframe(prod_df, use_container_width=True)
         
@@ -106,6 +146,18 @@ if st.session_state.planning_results is not None:
                 st.image(fig_paths[3], use_container_width=True)
 
     with tab3:
+        st.subheader("Reserve System Activity")
+        
+        if not reserve_df.empty:
+            st.dataframe(reserve_df, use_container_width=True)
+            
+            # Show reserve chart
+            if len(fig_paths) > 4 and os.path.exists(fig_paths[4]):
+                st.image(fig_paths[4], caption="Reserve System Status", use_container_width=True)
+        else:
+            st.info("No reserve system activity recorded - demand was fully met by production capacity.")
+
+    with tab4:
         st.subheader("Download Results")
         
         col1, col2 = st.columns(2)
@@ -113,7 +165,8 @@ if st.session_state.planning_results is not None:
             ("production_plan.csv", "Production Plan"),
             ("shipments.csv", "Shipments"),
             ("inventory_by_dc.csv", "Inventory by DC"),
-            ("fulfillment_summary.csv", "Fulfillment Summary")
+            ("fulfillment_summary.csv", "Fulfillment Summary"),
+            ("reserve_transactions.csv", "Reserve Transactions")
         ]
         
         for idx, (file, desc) in enumerate(files):

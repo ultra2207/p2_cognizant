@@ -3,34 +3,165 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import random
 
 OUTPUT_DIR = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Demand hardcoded
-demand_data = {
-    "Week": [1, 2, 3, 4],
-    "North_Regular": [30000, 35000, 40000, 45000],
-    "North_Diet": [20000, 25000, 30000, 35000],
-    "South_Regular": [25000, 30000, 35000, 40000],
-    "South_Diet": [15000, 20000, 25000, 30000],
-}
+# Global reserve system
+RESERVE_CAPACITY = 5000
+current_reserve = RESERVE_CAPACITY
+
+def generate_random_demand(num_weeks=4, base_regular_north=30000, base_diet_north=20000, 
+                          base_regular_south=25000, base_diet_south=15000, variance=0.2, seed=None):
+    """
+    Generate random demand data with some variance around base values
+    
+    Args:
+        num_weeks: Number of weeks to generate
+        base_*: Base demand values for each DC/SKU combination
+        variance: Percentage variance (0.2 = ±20%)
+        seed: Random seed for reproducibility
+    """
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+    
+    weeks = list(range(1, num_weeks + 1))
+    data = {"Week": weeks}
+    
+    # Generate demand with variance and growth trend
+    for week in weeks:
+        # Apply growth trend (5% per week)
+        growth_factor = 1 + (week - 1) * 0.05
+        
+        # Add random variance
+        variance_factor = 1 + np.random.uniform(-variance, variance)
+        
+        data[f"North_Regular"] = data.get("North_Regular", [])
+        data[f"North_Diet"] = data.get("North_Diet", [])
+        data[f"South_Regular"] = data.get("South_Regular", [])
+        data[f"South_Diet"] = data.get("South_Diet", [])
+        
+        data["North_Regular"].append(int(base_regular_north * growth_factor * variance_factor))
+        data["North_Diet"].append(int(base_diet_north * growth_factor * variance_factor))
+        data["South_Regular"].append(int(base_regular_south * growth_factor * variance_factor))
+        data["South_Diet"].append(int(base_diet_south * growth_factor * variance_factor))
+    
+    return pd.DataFrame(data)
+
+def apply_outflow_container_rounding(demand_df, container_size=750):
+    """
+    Rounds up dedef run_planner(capacity, truck_size, safety, demand_df=None, container_size=750):
+    if demand_df is None:
+        demand_df = pd.DataFrame(demand_data)
+    
+    # Apply outflow container rounding to demand
+    demand_df = apply_outflow_container_rounding(demand_df, container_size)
+    
+    prod_df = plan_production(demand_df, capacity)
+    ship_df = allocate_fair_share(demand_df, prod_df)
+    ship_df = apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety)
+    inv_df = simulate_inventory_with_buffer(ship_df, demand_df, safety)
+    ful_df = fulfillment_summary_with_buffer(demand_df, inv_df)est container size multiples for customer fulfillment
+    Each customer order must be in multiples of container_size (default 750 bottles)
+    """
+    demand_df = demand_df.copy()
+    
+    # Columns to round (all demand columns)
+    demand_columns = [col for col in demand_df.columns if col != "Week"]
+    
+    for col in demand_columns:
+        # Round up to nearest container multiple
+        demand_df[col] = np.ceil(demand_df[col] / container_size) * container_size
+    
+    return demand_df
+
+# Generate random demand data (with seed for reproducibility in testing)
+demand_data = generate_random_demand(num_weeks=4, seed=42).to_dict('list')
 demand_df = pd.DataFrame(demand_data)
 
 # ---------- Planning Logic ----------
-def plan_production(demand_df, capacity):
+def plan_production_with_reserve(demand_df, capacity):
+    """
+    Plan production considering reserve system.
+    When demand exceeds production, dip into reserve.
+    When production exceeds demand, refill reserve.
+    """
+    global current_reserve
     prod = []
+    reserve_transactions = []
+    
     for i, row in demand_df.iterrows():
         week = row["Week"]
-        reg = row["North_Regular"] + row["South_Regular"]
-        diet = row["North_Diet"] + row["South_Diet"]
-        total = reg + diet
-        if total <= capacity:
-            prod.append([week, reg, diet])
+        reg_demand = row["North_Regular"] + row["South_Regular"]
+        diet_demand = row["North_Diet"] + row["South_Diet"]
+        total_demand = reg_demand + diet_demand
+        
+        # Calculate what we can produce this week
+        if total_demand <= capacity:
+            # We can meet all demand with production
+            reg_prod = reg_demand
+            diet_prod = diet_demand
+            total_prod = total_demand
+            
+            # Calculate surplus production
+            surplus = capacity - total_prod
+            
+            # Use surplus to refill reserve
+            reserve_refill = min(surplus, RESERVE_CAPACITY - current_reserve)
+            current_reserve += reserve_refill
+            
+            reserve_transactions.append({
+                'Week': week,
+                'Action': 'Refill',
+                'Amount': reserve_refill,
+                'Reserve_Before': current_reserve - reserve_refill,
+                'Reserve_After': current_reserve,
+                'Surplus_Used': reserve_refill,
+                'Remaining_Surplus': surplus - reserve_refill
+            })
+            
         else:
-            scale = capacity / total
-            prod.append([week, int(reg * scale), int(diet * scale)])
-    return pd.DataFrame(prod, columns=["Week", "Regular", "Diet"])
+            # Demand exceeds capacity - need to use reserve
+            deficit = total_demand - capacity
+            reserve_used = min(deficit, current_reserve)
+            current_reserve -= reserve_used
+            
+            # Scale production to capacity
+            scale = capacity / total_demand
+            reg_prod = int(reg_demand * scale)
+            diet_prod = int(diet_demand * scale)
+            
+            # Add reserve to production allocation proportionally
+            if total_demand > 0:
+                reg_from_reserve = int(reserve_used * reg_demand / total_demand)
+                diet_from_reserve = reserve_used - reg_from_reserve
+                
+                reg_prod += reg_from_reserve
+                diet_prod += diet_from_reserve
+            
+            reserve_transactions.append({
+                'Week': week,
+                'Action': 'Use',
+                'Amount': reserve_used,
+                'Reserve_Before': current_reserve + reserve_used,
+                'Reserve_After': current_reserve,
+                'Deficit': deficit,
+                'Unmet_Demand': deficit - reserve_used
+            })
+        
+        prod.append([week, reg_prod, diet_prod])
+    
+    prod_df = pd.DataFrame(prod, columns=["Week", "Regular", "Diet"])
+    reserve_df = pd.DataFrame(reserve_transactions)
+    
+    return prod_df, reserve_df
+
+def plan_production(demand_df, capacity):
+    """Wrapper for backward compatibility"""
+    prod_df, _ = plan_production_with_reserve(demand_df, capacity)
+    return prod_df
 
 def allocate_fair_share(demand_df, prod_df):
     shipments = []
@@ -49,8 +180,8 @@ def allocate_fair_share(demand_df, prod_df):
             shipments.append([week, sku, "South", s_share])
     return pd.DataFrame(shipments, columns=["Week", "SKU", "DC", "Qty"])
 
-def apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety, initial_inventory=None):
-    """Enhanced truck rounding that considers inventory levels and actual needs"""
+def apply_smart_truck_rounding_with_buffer(ship_df, demand_df, truck_size, safety, initial_inventory=None):
+    """Enhanced truck rounding with buffer stock consumption and replenishment"""
     ship_df = ship_df.copy()
     
     # Initialize inventory if not provided
@@ -70,58 +201,70 @@ def apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety, initial_i
             sku = row["SKU"]
             proposed_qty = row["Qty"]
             
-            # Calculate actual need
+            # Calculate actual need considering buffer stock can be consumed
             current_inv = inv[(dc, sku)]
             demand = week_demand[f"{dc}_{sku}"]
-            needed = max(0, demand + safety - current_inv)
+            
+            # Minimum needed to cover demand (can eat into buffer stock)
+            min_needed = max(0, demand - current_inv)
+            
+            # Preferred amount to replenish buffer stock
+            preferred_needed = max(0, demand + safety - current_inv)
             
             # Calculate truck options
-            trucks_down = int(needed // truck_size)
-            trucks_up = trucks_down + 1
+            min_trucks = int(min_needed // truck_size) if min_needed > 0 else 0
+            preferred_trucks = int(np.ceil(preferred_needed / truck_size)) if preferred_needed > 0 else 0
             
-            qty_down = trucks_down * truck_size
-            qty_up = trucks_up * truck_size
+            min_qty = min_trucks * truck_size
+            preferred_qty = preferred_trucks * truck_size
             
             # Evaluate outcomes
-            ending_inv_down = current_inv + qty_down - demand
-            ending_inv_up = current_inv + qty_up - demand
+            ending_inv_min = current_inv + min_qty - demand
+            ending_inv_preferred = current_inv + preferred_qty - demand
             
-            # Decision logic
-            if qty_down == 0 and needed > 0:
-                # Must send at least one truck
-                chosen_qty = qty_up
-                chosen_trucks = trucks_up
-            elif ending_inv_down >= safety:
-                # Rounding down meets safety stock - prefer this to avoid waste
-                chosen_qty = qty_down
-                chosen_trucks = trucks_down
-            elif (qty_up - needed) > (truck_size * 0.6):
-                # Rounding up creates too much waste (>60% of truck capacity)
-                # Accept going slightly below safety stock
-                chosen_qty = qty_down
-                chosen_trucks = trucks_down
+            # Decision logic with buffer stock flexibility
+            if min_qty >= min_needed:
+                # Can fulfill demand with minimum shipment
+                if (preferred_qty - min_qty) <= (truck_size * 0.5):
+                    # Small difference, prefer to replenish buffer
+                    chosen_qty = preferred_qty
+                    chosen_trucks = preferred_trucks
+                elif ending_inv_min >= 0:
+                    # Minimum shipment leaves non-negative inventory
+                    chosen_qty = min_qty
+                    chosen_trucks = min_trucks
+                else:
+                    # Need at least one truck to avoid stockout
+                    chosen_qty = truck_size
+                    chosen_trucks = 1
             else:
-                # Round up to maintain safety stock
-                chosen_qty = qty_up
-                chosen_trucks = trucks_up
+                # Need more than minimum - go with preferred
+                chosen_qty = preferred_qty
+                chosen_trucks = preferred_trucks
             
             # Update the dataframe
             ship_df.at[idx, "Trucks"] = chosen_trucks
             ship_df.at[idx, "Qty"] = chosen_qty
             
-            # Update inventory for next iteration
+            # Update inventory for next iteration (can go below safety stock)
             inv[(dc, sku)] = max(0, current_inv + chosen_qty - demand)
     
     return ship_df
+
+def apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety, initial_inventory=None):
+    """Enhanced truck rounding that considers inventory levels and actual needs"""
+    return apply_smart_truck_rounding_with_buffer(ship_df, demand_df, truck_size, safety, initial_inventory)
 
 def apply_truck_rounding(ship_df, truck_size):
     """Simple truck rounding - kept for backward compatibility"""
     return apply_smart_truck_rounding(ship_df, demand_df, truck_size, 5000)
 
-def simulate_inventory(ship_df, demand_df, safety):
+def simulate_inventory_with_buffer(ship_df, demand_df, safety):
+    """Simulate inventory allowing buffer stock consumption and replenishment"""
     records = []
     inv = {("North","Regular"):safety, ("North","Diet"):safety,
            ("South","Regular"):safety, ("South","Diet"):safety}
+    
     for i, row in demand_df.iterrows():
         week = row["Week"]
         for dc in ["North","South"]:
@@ -129,17 +272,55 @@ def simulate_inventory(ship_df, demand_df, safety):
                 arrivals = ship_df[(ship_df["Week"]==week)&(ship_df["DC"]==dc)&(ship_df["SKU"]==sku)]["Qty"].sum()
                 demand = row[f"{dc}_{sku}"]
                 start = inv[(dc,sku)]
-                end = start + arrivals - demand
                 
-                # Don't artificially bump inventory to safety stock
-                # Let it go below and track the shortfall
+                # Calculate ending inventory (can go below safety stock)
+                end = start + arrivals - demand
                 actual_end = max(0, end)  # Can't go negative
                 
-                records.append([week, dc, sku, start, arrivals, demand, actual_end])
+                # Track if we're below safety stock
+                buffer_used = max(0, safety - actual_end)
+                
+                records.append([week, dc, sku, start, arrivals, demand, actual_end, buffer_used])
                 inv[(dc,sku)] = actual_end
-    return pd.DataFrame(records, columns=["Week","DC","SKU","Start","Arrivals","Demand","End"])
+                
+    return pd.DataFrame(records, columns=["Week","DC","SKU","Start","Arrivals","Demand","End","BufferUsed"])
+
+def simulate_inventory(ship_df, demand_df, safety):
+    """Wrapper for backward compatibility"""
+    df = simulate_inventory_with_buffer(ship_df, demand_df, safety)
+    return df[["Week","DC","SKU","Start","Arrivals","Demand","End"]]  # Return original columns
+
+def fulfillment_summary_with_buffer(demand_df, inv_df):
+    """Calculate fulfillment considering buffer stock usage"""
+    fulfilled = []
+    for i, row in demand_df.iterrows():
+        week = row["Week"]
+        for dc in ["North","South"]:
+            for sku in ["Regular","Diet"]:
+                demand = row[f"{dc}_{sku}"]
+                
+                # Get inventory data for this week/dc/sku
+                inv_row = inv_df[(inv_df["Week"]==week) & (inv_df["DC"]==dc) & (inv_df["SKU"]==sku)]
+                if not inv_row.empty:
+                    start = inv_row.iloc[0]["Start"]
+                    arrivals = inv_row.iloc[0]["Arrivals"]
+                    end = inv_row.iloc[0]["End"]
+                    
+                    # Calculate actual fulfillment
+                    available = start + arrivals
+                    actual_fulfilled = min(demand, available)
+                    
+                    # Check if buffer stock was used
+                    buffer_used = max(0, 5000 - end) if end >= 0 else 5000
+                    
+                    fulfilled.append([week, dc, sku, demand, actual_fulfilled, buffer_used])
+                else:
+                    fulfilled.append([week, dc, sku, demand, 0, 0])
+                    
+    return pd.DataFrame(fulfilled, columns=["Week","DC","SKU","Demand","Fulfilled","BufferUsed"])
 
 def fulfillment_summary(demand_df):
+    """Simple fulfillment summary - kept for backward compatibility"""
     fulfilled = []
     for i, row in demand_df.iterrows():
         week = row["Week"]
@@ -196,10 +377,69 @@ def plot_inventory(inv_df, safety):
     plt.savefig(path); plt.close()
     return path
 
-def run_planner(capacity, truck_size, safety, demand_df=None):
+def plot_reserve_status(reserve_df):
+    """Plot reserve system transactions and status over time"""
+    if reserve_df.empty:
+        # Create empty plot if no transactions
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.axhline(RESERVE_CAPACITY, color="blue", linestyle="-", label="Reserve Capacity")
+        ax.set_title("Reserve System Status")
+        ax.set_xlabel("Week")
+        ax.set_ylabel("Reserve Level")
+        ax.legend()
+        plt.tight_layout()
+        path = os.path.join(OUTPUT_DIR,"fig_reserve_status.png")
+        plt.savefig(path); plt.close()
+        return path
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    
+    # Plot 1: Reserve level over time
+    weeks = reserve_df['Week'].values
+    reserve_after = reserve_df['Reserve_After'].values
+    
+    ax1.plot(weeks, reserve_after, marker='o', linewidth=2, label="Reserve Level")
+    ax1.axhline(RESERVE_CAPACITY, color="blue", linestyle="--", label="Max Capacity")
+    ax1.axhline(0, color="red", linestyle="--", label="Empty")
+    ax1.set_title("Reserve Level Over Time")
+    ax1.set_xlabel("Week")
+    ax1.set_ylabel("Reserve Units")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Reserve transactions
+    refills = reserve_df[reserve_df['Action'] == 'Refill']
+    uses = reserve_df[reserve_df['Action'] == 'Use']
+    
+    if not refills.empty:
+        ax2.bar(refills['Week'], refills['Amount'], alpha=0.7, color='green', label='Refill')
+    if not uses.empty:
+        ax2.bar(uses['Week'], -uses['Amount'], alpha=0.7, color='red', label='Use')
+    
+    ax2.set_title("Reserve Transactions")
+    ax2.set_xlabel("Week")
+    ax2.set_ylabel("Amount (Positive=Refill, Negative=Use)")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    path = os.path.join(OUTPUT_DIR,"fig_reserve_status.png")
+    plt.savefig(path); plt.close()
+    return path
+
+def run_planner(capacity, truck_size, safety, demand_df=None, container_size=750, reset_reserve=True):
+    global current_reserve
+    
+    if reset_reserve:
+        current_reserve = RESERVE_CAPACITY
+    
     if demand_df is None:
-        demand_df = pd.DataFrame(demand_data)
-    prod_df = plan_production(demand_df, capacity)
+        demand_df = generate_random_demand(num_weeks=4)
+    
+    # Apply outflow container rounding to demand
+    demand_df = apply_outflow_container_rounding(demand_df, container_size)
+    
+    prod_df, reserve_df = plan_production_with_reserve(demand_df, capacity)
     ship_df = allocate_fair_share(demand_df, prod_df)
     ship_df = apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety)
     inv_df = simulate_inventory(ship_df, demand_df, safety)
@@ -211,17 +451,19 @@ def run_planner(capacity, truck_size, safety, demand_df=None):
     ship_df.to_csv(os.path.join(OUTPUT_DIR,"shipments.csv"),index=False)
     inv_df.to_csv(os.path.join(OUTPUT_DIR,"inventory_by_dc.csv"),index=False)
     ful_df.to_csv(os.path.join(OUTPUT_DIR,"fulfillment_summary.csv"),index=False)
+    reserve_df.to_csv(os.path.join(OUTPUT_DIR,"reserve_transactions.csv"),index=False)
 
     # Plots
     fig_paths = plot_demand_vs_fulfilled(ful_df)
     fig_paths.append(plot_shipments(ship_df))
     fig_paths.append(plot_inventory(inv_df, safety))
+    fig_paths.append(plot_reserve_status(reserve_df))
 
-    return prod_df, ship_df, inv_df, ful_df, fig_paths
+    return prod_df, ship_df, inv_df, ful_df, reserve_df, fig_paths
 
 # For tests
 def default_demand_df():
-    return pd.DataFrame(demand_data)
+    return generate_random_demand(num_weeks=4, seed=42)
 
 def default_initial_inventory_df(safety):
     return pd.DataFrame({
@@ -239,26 +481,42 @@ if __name__ == "__main__":
     parser.add_argument("--capacity", type=int, required=True)
     parser.add_argument("--truck", type=int, required=True)
     parser.add_argument("--safety", type=int, required=True)
+    parser.add_argument("--container", type=int, default=750, help="Customer container size (default: 750)")
     parser.add_argument("--demand_csv", type=str, default=None)
     parser.add_argument("--init_csv", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for demand generation")
     args = parser.parse_args()
+
+    # Reset reserve system
+    current_reserve = RESERVE_CAPACITY
 
     if args.demand_csv:
         demand_df = pd.read_csv(args.demand_csv)
+    else:
+        demand_df = generate_random_demand(num_weeks=4, seed=args.seed)
 
-    prod_df = plan_production(demand_df, args.capacity)
+    # Apply outflow container rounding
+    demand_df = apply_outflow_container_rounding(demand_df, args.container)
+
+    prod_df, reserve_df = plan_production_with_reserve(demand_df, args.capacity)
     ship_df = allocate_fair_share(demand_df, prod_df)
     ship_df = apply_smart_truck_rounding(ship_df, demand_df, args.truck, args.safety)
-    inv_df = simulate_inventory(ship_df, demand_df, args.safety)
-    ful_df = fulfillment_summary(demand_df)
+    inv_df = simulate_inventory_with_buffer(ship_df, demand_df, args.safety)
+    ful_df = fulfillment_summary_with_buffer(demand_df, inv_df)
 
     prod_df.to_csv(os.path.join(OUTPUT_DIR,"production_plan.csv"),index=False)
     ship_df.to_csv(os.path.join(OUTPUT_DIR,"shipments.csv"),index=False)
     inv_df.to_csv(os.path.join(OUTPUT_DIR,"inventory_by_dc.csv"),index=False)
     ful_df.to_csv(os.path.join(OUTPUT_DIR,"fulfillment_summary.csv"),index=False)
+    reserve_df.to_csv(os.path.join(OUTPUT_DIR,"reserve_transactions.csv"),index=False)
 
     plot_demand_vs_fulfilled(ful_df)
     plot_shipments(ship_df)
     plot_inventory(inv_df,args.safety)
+    plot_reserve_status(reserve_df)
 
     print("Plans generated successfully.")
+    print(f"Final reserve level: {current_reserve}")
+    if not reserve_df.empty:
+        print("\nReserve transactions:")
+        print(reserve_df.to_string(index=False))
