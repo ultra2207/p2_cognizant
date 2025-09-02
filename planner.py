@@ -52,18 +52,7 @@ def generate_random_demand(num_weeks=4, base_regular_north=15000, base_diet_nort
 
 def apply_outflow_container_rounding(demand_df, container_size=750):
     """
-    Rounds up dedef run_planner(capacity, truck_size, safety, demand_df=None, container_size=750):
-    if demand_df is None:
-        demand_df = pd.DataFrame(demand_data)
-    
-    # Apply outflow container rounding to demand
-    demand_df = apply_outflow_container_rounding(demand_df, container_size)
-    
-    prod_df = plan_production(demand_df, capacity)
-    ship_df = allocate_fair_share(demand_df, prod_df)
-    ship_df = apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety)
-    inv_df = simulate_inventory_with_buffer(ship_df, demand_df, safety)
-    ful_df = fulfillment_summary_with_buffer(demand_df, inv_df)est container size multiples for customer fulfillment
+    Rounds up demand to smallest container size multiples for customer fulfillment
     Each customer order must be in multiples of container_size (default 750 bottles)
     """
     demand_df = demand_df.copy()
@@ -82,10 +71,10 @@ demand_data = generate_random_demand(num_weeks=4, seed=42).to_dict('list')
 demand_df = pd.DataFrame(demand_data)
 
 # ---------- Planning Logic ----------
-def plan_production_with_reserve(demand_df, capacity, container_size=750):
+def plan_production_with_reserve(demand_df, capacity):
     """
     Plan production considering reserve system.
-    Production is rounded to container multiples.
+    Production is based on actual demand (no container rounding on production side).
     When demand exceeds production, dip into reserve.
     When production exceeds demand, refill reserve.
     """
@@ -99,65 +88,49 @@ def plan_production_with_reserve(demand_df, capacity, container_size=750):
         diet_demand = row["North_Diet"] + row["South_Diet"]
         total_demand = reg_demand + diet_demand
         
-        # Calculate what we can produce this week (round to container multiples)
+        # Calculate what we can produce this week
         if total_demand <= capacity:
             # We can meet all demand with production
-            # Round each SKU production to container multiples
-            reg_prod = int(np.ceil(reg_demand / container_size)) * container_size
-            diet_prod = int(np.ceil(diet_demand / container_size)) * container_size
-            total_prod = reg_prod + diet_prod
-            
-            # Check if rounded production exceeds capacity
-            if total_prod > capacity:
-                # Scale down proportionally and round to containers
-                scale = capacity / total_prod
-                reg_prod = int(reg_prod * scale // container_size) * container_size
-                diet_prod = int(diet_prod * scale // container_size) * container_size
-                total_prod = reg_prod + diet_prod
+            reg_prod = reg_demand
+            diet_prod = diet_demand
+            total_prod = total_demand
             
             # Calculate surplus production
             surplus = capacity - total_prod
             
-            # Use surplus to refill reserve (only if we have meaningful surplus)
-            if surplus >= container_size:
-                reserve_refill = min(surplus, RESERVE_CAPACITY - current_reserve)
-                # Round reserve refill to container multiples
-                reserve_refill = int(reserve_refill // container_size) * container_size
-                current_reserve += reserve_refill
-                
-                if reserve_refill > 0:
-                    reserve_transactions.append({
-                        'Week': week,
-                        'Action': 'Refill',
-                        'Amount': reserve_refill,
-                        'Reserve_Before': current_reserve - reserve_refill,
-                        'Reserve_After': current_reserve,
-                        'Surplus_Used': reserve_refill,
-                        'Remaining_Surplus': surplus - reserve_refill
-                    })
+            # Use surplus to refill reserve
+            reserve_refill = min(surplus, RESERVE_CAPACITY - current_reserve)
+            current_reserve += reserve_refill
+            
+            if reserve_refill > 0:
+                reserve_transactions.append({
+                    'Week': week,
+                    'Action': 'Refill',
+                    'Amount': reserve_refill,
+                    'Reserve_Before': current_reserve - reserve_refill,
+                    'Reserve_After': current_reserve,
+                    'Surplus_Used': reserve_refill,
+                    'Remaining_Surplus': surplus - reserve_refill
+                })
             
         else:
             # Demand exceeds capacity - need to use reserve
             deficit = total_demand - capacity
             reserve_used = min(deficit, current_reserve)
-            # Round reserve usage to container multiples
-            reserve_used = int(reserve_used // container_size) * container_size
             current_reserve -= reserve_used
             
-            # Scale production to capacity and round to containers
-            available_production = capacity + reserve_used
-            scale = available_production / total_demand
+            # Scale production to capacity
+            scale = capacity / total_demand
+            reg_prod = int(reg_demand * scale)
+            diet_prod = int(diet_demand * scale)
             
-            reg_prod = int(reg_demand * scale // container_size) * container_size
-            diet_prod = int(diet_demand * scale // container_size) * container_size
-            
-            # Ensure we don't exceed available production
-            total_prod = reg_prod + diet_prod
-            if total_prod > available_production:
-                # Reduce proportionally
-                scale_down = available_production / total_prod
-                reg_prod = int(reg_prod * scale_down // container_size) * container_size
-                diet_prod = int(diet_prod * scale_down // container_size) * container_size
+            # Add reserve to production allocation proportionally
+            if total_demand > 0:
+                reg_from_reserve = int(reserve_used * reg_demand / total_demand)
+                diet_from_reserve = reserve_used - reg_from_reserve
+                
+                reg_prod += reg_from_reserve
+                diet_prod += diet_from_reserve
             
             if reserve_used > 0:
                 reserve_transactions.append({
@@ -179,7 +152,7 @@ def plan_production_with_reserve(demand_df, capacity, container_size=750):
 
 def plan_production(demand_df, capacity):
     """Wrapper for backward compatibility"""
-    prod_df, _ = plan_production_with_reserve(demand_df, capacity, container_size=750)
+    prod_df, _ = plan_production_with_reserve(demand_df, capacity)
     return prod_df
 
 def allocate_fair_share(demand_df, prod_df):
@@ -212,9 +185,9 @@ def allocate_fair_share(demand_df, prod_df):
 
 def apply_smart_truck_rounding_with_buffer(ship_df, demand_df, truck_size, safety, initial_inventory=None):
     """
-    Apply truck rounding where:
-    - Shipments are in multiples of 750 (container size)
-    - Trucks are calculated to carry the required containers
+    Apply truck rounding with forward-looking optimization:
+    - Fill trucks to capacity (10k) when future demand warrants it
+    - Don't overfill if future demand doesn't require it
     - Maintain safety stock levels
     """
     ship_df = ship_df.copy()
@@ -234,26 +207,65 @@ def apply_smart_truck_rounding_with_buffer(ship_df, demand_df, truck_size, safet
         for idx, row in week_shipments.iterrows():
             dc = row["DC"]
             sku = row["SKU"]
-            allocated_qty = row["Qty"]  # This should already be in multiples of 750 from production
+            allocated_qty = row["Qty"]  # This is the fair share allocation
             
-            # Calculate actual need considering current inventory and safety stock
+            # Calculate current need
             current_inv = inv[(dc, sku)]
-            demand = week_demand[f"{dc}_{sku}"]
+            current_demand = week_demand[f"{dc}_{sku}"]
             
-            # The allocated quantity should already be optimal from production planning
-            # Just ensure it's in container multiples and calculate trucks needed
-            final_qty = allocated_qty  # Already in multiples of 750
+            # Look at future demand to optimize truck filling
+            future_demand = 0
+            current_week = week
+            remaining_weeks = demand_df[demand_df["Week"] > current_week]
             
-            # Calculate trucks needed to carry this quantity
-            # Each truck can carry truck_size bottles
-            trucks_needed = int(np.ceil(final_qty / truck_size)) if final_qty > 0 else 0
+            for _, future_row in remaining_weeks.iterrows():
+                future_demand += future_row[f"{dc}_{sku}"]
+            
+            # Calculate what we minimally need this week
+            min_needed = max(0, current_demand + safety - current_inv)
+            
+            # Calculate how many trucks the allocated quantity needs
+            base_trucks = int(np.ceil(allocated_qty / truck_size)) if allocated_qty > 0 else 0
+            base_truck_qty = base_trucks * truck_size
+            
+            # Check if we can optimize by filling trucks to capacity
+            if base_truck_qty > allocated_qty:
+                # We have extra space in trucks
+                extra_space = base_truck_qty - allocated_qty
+                
+                # Only use extra space if future demand can justify it
+                # or if we need it to maintain safety stock
+                if future_demand > extra_space or min_needed > allocated_qty:
+                    # Future demand or safety stock justifies filling trucks
+                    final_qty = base_truck_qty
+                    final_trucks = base_trucks
+                else:
+                    # Future demand doesn't justify overfilling
+                    # Use minimum trucks needed for allocated quantity
+                    if allocated_qty > 0:
+                        min_trucks = max(1, int(np.ceil(allocated_qty / truck_size)))
+                        final_qty = min_trucks * truck_size
+                        final_trucks = min_trucks
+                    else:
+                        final_qty = 0
+                        final_trucks = 0
+            else:
+                # Allocated quantity exactly fits or needs more trucks
+                final_qty = base_truck_qty
+                final_trucks = base_trucks
+            
+            # Ensure we don't ship less than minimally needed for safety
+            if final_qty < min_needed:
+                safety_trucks = int(np.ceil(min_needed / truck_size))
+                final_qty = safety_trucks * truck_size
+                final_trucks = safety_trucks
             
             # Update the dataframe
-            ship_df.at[idx, "Trucks"] = trucks_needed
+            ship_df.at[idx, "Trucks"] = final_trucks
             ship_df.at[idx, "Qty"] = final_qty
             
             # Update inventory for next iteration
-            inv[(dc, sku)] = max(safety, current_inv + final_qty - demand)
+            inv[(dc, sku)] = max(safety, current_inv + final_qty - current_demand)
     
     return ship_df
 
@@ -447,7 +459,7 @@ def run_planner(capacity, truck_size, safety, demand_df=None, container_size=750
     # Apply outflow container rounding to demand
     demand_df = apply_outflow_container_rounding(demand_df, container_size)
     
-    prod_df, reserve_df = plan_production_with_reserve(demand_df, capacity, container_size)
+    prod_df, reserve_df = plan_production_with_reserve(demand_df, capacity)
     ship_df = allocate_fair_share(demand_df, prod_df)
     ship_df = apply_smart_truck_rounding(ship_df, demand_df, truck_size, safety)
     inv_df = simulate_inventory(ship_df, demand_df, safety)
@@ -489,7 +501,7 @@ if __name__ == "__main__":
     parser.add_argument("--capacity", type=int, required=True)
     parser.add_argument("--truck", type=int, required=True)
     parser.add_argument("--safety", type=int, required=True)
-    parser.add_argument("--container", type=int, default=750, help="Customer container size (default: 750)")
+    parser.add_argument("--container", type=int, default=750, help="Minimum Order Quantity (default: 750)")
     parser.add_argument("--demand_csv", type=str, default=None)
     parser.add_argument("--init_csv", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None, help="Random seed for demand generation")
@@ -506,7 +518,7 @@ if __name__ == "__main__":
     # Apply outflow container rounding
     demand_df = apply_outflow_container_rounding(demand_df, args.container)
 
-    prod_df, reserve_df = plan_production_with_reserve(demand_df, args.capacity, args.container)
+    prod_df, reserve_df = plan_production_with_reserve(demand_df, args.capacity)
     ship_df = allocate_fair_share(demand_df, prod_df)
     ship_df = apply_smart_truck_rounding(ship_df, demand_df, args.truck, args.safety)
     inv_df = simulate_inventory_with_buffer(ship_df, demand_df, args.safety)

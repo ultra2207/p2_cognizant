@@ -16,7 +16,7 @@ with st.sidebar:
     capacity = st.number_input("Weekly Plant Capacity", value=150000, min_value=0, help="Total bottles the plant can produce per week")
     truck = st.number_input("Truck Size (bottles)", value=10000, min_value=0, help="Number of bottles per truck shipment")
     safety = st.number_input("Safety Stock / DC / SKU", value=5000, min_value=0, help="Minimum inventory to maintain at each DC per SKU")
-    container = st.number_input("Customer Container Size", value=750, min_value=0, help="Customer orders must be in multiples of this size")
+    container = st.number_input("Minimum Order Quantity", value=750, min_value=0, help="Customer orders must be in multiples of this size")
 
     st.header("Demand Generation")
     use_random = st.checkbox("Generate Random Demand", value=True, help="Generate random demand data instead of using uploaded file")
@@ -42,6 +42,9 @@ if st.button("Run Planning", type="primary", width='stretch'):
         else:
             demand_df = default_demand_df()
 
+        # Store original demand before adjustment
+        original_demand_df = demand_df.copy()
+        
         prod_df, ship_df, inv_df, ful_df, reserve_df, fig_paths = run_planner(capacity, truck, safety, demand_df, container)
         
         # Store results in session state
@@ -56,7 +59,8 @@ if st.button("Run Planning", type="primary", width='stretch'):
             'truck': truck,
             'safety': safety,
             'container': container,
-            'demand_df': demand_df
+            'demand_df': demand_df,
+            'original_demand_df': original_demand_df
         }
 
     st.success("Plan generated successfully!")
@@ -71,6 +75,7 @@ if st.session_state.planning_results is not None:
     reserve_df = results['reserve_df']
     fig_paths = results['fig_paths']
     demand_df = results['demand_df']
+    original_demand_df = results['original_demand_df']
     
     # Display key metrics including reserve status
     total_weekly_capacity = results['capacity'] * prod_df.shape[0]
@@ -109,9 +114,24 @@ if st.session_state.planning_results is not None:
 
     with tab1:
         with st.expander("Generated Demand", expanded=True):
-            st.dataframe(demand_df, width='stretch')
+            # Create combined demand table with original and MOQ-adjusted values
+            combined_demand_df = original_demand_df.copy()
             
-        with st.expander("Production based on MOQ", expanded=True):
+            # Add MOQ-adjusted columns
+            for col in original_demand_df.columns:
+                if col != "Week":
+                    combined_demand_df[f"{col}_Adjusted_MOQ"] = demand_df[col]
+            
+            # Reorder columns to show original and adjusted side by side
+            new_cols = ["Week"]
+            for col in original_demand_df.columns:
+                if col != "Week":
+                    new_cols.extend([col, f"{col}_Adjusted_MOQ"])
+            
+            combined_demand_df = combined_demand_df[new_cols]
+            st.dataframe(combined_demand_df, width='stretch')
+            
+        with st.expander("Production", expanded=True):
             st.dataframe(prod_df, width='stretch')
         
         with st.expander("Shipments", expanded=False):
